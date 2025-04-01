@@ -1,0 +1,8 @@
+{
+  "name": "the-dl",
+  "main": "server/party.ts",
+  "parties": {
+    "room": "server/party.ts"
+  },
+  "compatibilityDate": "2025-04-01"
+}
