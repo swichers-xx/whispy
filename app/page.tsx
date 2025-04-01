@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import * as Party from 'partysocket';
 import { debounce } from 'lodash';
 
@@ -17,6 +17,7 @@ interface User {
   name: string;
   lastSeen: number;
   isTyping: boolean;
+  rankingScore?: number;
 }
 
 interface BaseMessage {
@@ -32,6 +33,8 @@ interface TextMessage extends BaseMessage {
   replyTo?: string;
   reactions?: { [emoji: string]: string[] };
   readBy?: string[];
+  ratings?: { [raterUserId: string]: number };
+  ratingScore?: number;
 }
 
 interface MediaMessage extends BaseMessage {
@@ -42,6 +45,8 @@ interface MediaMessage extends BaseMessage {
   replyTo?: string;
   reactions?: { [emoji: string]: string[] };
   readBy?: string[];
+  ratings?: { [raterUserId: string]: number };
+  ratingScore?: number;
 }
 
 type Message = TextMessage | MediaMessage;
@@ -55,6 +60,9 @@ const defaultColorScheme: ColorScheme = {
 
 const EMOJI_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
+const RATING_BLINKERS = 1;
+const RATING_HARSH = -1;
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -63,7 +71,7 @@ export default function Home() {
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [colorScheme, setColorScheme] = useState<ColorScheme>(defaultColorScheme);
   const [mediaPreview, setMediaPreview] = useState<string | null>(null);
-  const [users, setUsers] = useState<Map<string, User>>(new Map());
+  const [users, setUsers] = useState<User[]>([]);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState<string | null>(null); // message ID
 
@@ -111,7 +119,7 @@ export default function Home() {
           case 'userList':
             const userMap = new Map<string, User>();
             data.users.forEach((user: User) => userMap.set(user.id, user));
-            setUsers(userMap);
+            setUsers(data.users);
             break;
           case 'read':
             setMessages(prev => prev.map(msg => {
@@ -137,6 +145,12 @@ export default function Home() {
               return msg;
             }));
             break;
+          case 'messageRatingUpdate':
+            setMessages(prev => prev.map(msg => msg.id === data.targetMessageId ? { ...msg, ratings: data.ratings, ratingScore: data.ratingScore } : msg));
+            break;
+          case 'userRankingUpdate':
+            setUsers(prev => prev.map(u => u.id === data.userId ? { ...u, rankingScore: data.rankingScore } : u));
+            break;
         }
       } else {
         setMessages((prev) => {
@@ -149,7 +163,7 @@ export default function Home() {
 
     socketRef.current.addEventListener('close', () => {
       setIsConnected(false);
-      setUsers(new Map());
+      setUsers([]);
     });
 
     return () => {
@@ -263,6 +277,16 @@ export default function Home() {
     setShowEmojiPicker(null);
   }
 
+  const rateMessage = (messageId: string, rating: number) => {
+    if (!socketRef.current) return;
+    socketRef.current.send(JSON.stringify({
+      type: 'clientAction',
+      action: 'rateMessage',
+      targetMessageId: messageId,
+      rating: rating // Send RATING_BLINKERS or RATING_HARSH
+    }));
+  }
+
   const toBase64 = (file: File): Promise<string> =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -343,6 +367,29 @@ export default function Home() {
             </div>
           )}
 
+          {/* Ratings */}  
+          {msg.ratings && Object.keys(msg.ratings).length > 0 && (
+            <div className="flex items-center justify-start mt-1">
+              <span className={`text-xs font-semibold ${(msg.ratingScore ?? 0) > 0 ? 'text-green-600' : (msg.ratingScore ?? 0) < 0 ? 'text-red-600' : 'text-gray-500'}`}>
+                [{(msg.ratingScore ?? 0) > 0 ? '+' : ''}{msg.ratingScore ?? 0}]
+              </span>
+              <button
+                onClick={() => rateMessage(msg.id, RATING_BLINKERS)}
+                className={`px-1 py-0.5 rounded text-xs transition-colors ${(msg.ratings?.[username] ?? 0) === RATING_BLINKERS ? 'bg-green-200 border border-green-400' : 'bg-gray-200 border-gray-300 hover:bg-green-100'}`}
+                title="Blinkers (+1)"
+              >
+                ✨
+              </button>
+              <button
+                onClick={() => rateMessage(msg.id, RATING_HARSH)}
+                className={`px-1 py-0.5 rounded text-xs transition-colors ${(msg.ratings?.[username] ?? 0) === RATING_HARSH ? 'bg-red-200 border border-red-400' : 'bg-gray-200 border-gray-300 hover:bg-red-100'}`}
+                title="Harsh (-1)"
+              >
+                💩
+              </button>
+            </div>
+          )}
+
           {/* Action Buttons (Reply/React) - Show on hover */} 
           <div className="absolute top-0 right-0 flex opacity-0 group-hover:opacity-100 transition-opacity -mt-4 mr-1 bg-black/40 backdrop-blur-sm rounded-full p-1 space-x-1">
             <button 
@@ -372,6 +419,39 @@ export default function Home() {
             </div>
           )}
         </div>
+      </div>
+    );
+  };
+
+  const renderRatings = (msg: Message) => {
+    const score = msg.ratingScore ?? 0; 
+    const userRating = msg.ratings?.[username]; 
+
+    if (msg.sender === username) {
+      return score !== 0 ? <span className={`ml-2 text-xs font-semibold ${score > 0 ? 'text-green-600' : 'text-red-600'}`}>[{score > 0 ? '+' : ''}{score}]</span> : null;
+    }
+
+    return (
+      <div className="flex items-center space-x-1 ml-2">
+        {score !== 0 && <span className={`text-xs font-semibold ${score > 0 ? 'text-green-600' : 'text-red-600'}`}>[{score > 0 ? '+' : ''}{score}]</span>}
+
+        <button
+          onClick={() => rateMessage(msg.id, RATING_BLINKERS)}
+          className={`px-1 py-0.5 rounded text-xs transition-colors ${userRating === RATING_BLINKERS ? 'bg-green-200 border border-green-400' : 'bg-gray-200 border-gray-300 hover:bg-green-100'}`}
+          title="Blinkers (+1)"
+          disabled={!username || msg.sender === username} 
+        >
+          ✨
+        </button>
+
+        <button
+          onClick={() => rateMessage(msg.id, RATING_HARSH)}
+          className={`px-1 py-0.5 rounded text-xs transition-colors ${userRating === RATING_HARSH ? 'bg-red-200 border border-red-400' : 'bg-gray-200 border-gray-300 hover:bg-red-100'}`}
+          title="Harsh (-1)"
+          disabled={!username || msg.sender === username} 
+        >
+          💩
+        </button>
       </div>
     );
   };
@@ -427,7 +507,7 @@ export default function Home() {
             </button>
             {/* User List Dropdown (Simple Example) */}  
             <div className="relative group">
-              <span className="text-purple-300 cursor-default">Online: {users.size}</span>
+              <span className="text-purple-300 cursor-default">Online: {users.length}</span>
               <div className="absolute hidden group-hover:block right-0 mt-1 w-48 bg-black/70 backdrop-blur-lg rounded-md shadow-lg p-2 z-20 border border-white/10">
                 {Array.from(users.values()).map(u => (
                   <p key={u.id} className={`text-sm ${colorScheme.text} ${u.name === username ? 'font-bold' : ''}`}>
