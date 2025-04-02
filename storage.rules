@@ -1,0 +1,25 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Default rule - deny all access
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+    
+    // Allow users to upload and read media files for chat messages
+    match /rooms/{roomId}/users/{userId}/media/{fileName} {
+      // Anyone can read media files
+      allow read: if request.auth != null;
+      // Only the owner can upload their own media
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Allow users to upload and manage their profile pictures
+    match /users/{userId}/profile/{fileName} {
+      // Anyone can view profile pictures
+      allow read: if request.auth != null;
+      // Only the owner can upload/update their profile picture
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Whispy Cloud Functions Demo</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <header class="mb-8">
+            <h1 class="text-3xl font-bold text-center text-gray-800">Whispy Cloud Functions Demo</h1>
+            <p class="text-center text-gray-600 mt-2">Interact with your deployed Google Cloud Functions</p>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Hello World Function -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-xl font-semibold mb-4">Hello World Function</h2>
+                <div class="mb-4">
+                    <label for="name" class="block text-sm font-medium text-gray-700 mb-1">Your Name:</label>
+                    <input type="text" id="name" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="Enter your name">
+                </div>
+                <button id="callHelloWorld" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-medium py-2 px-4 rounded-md">
+                    Call Function
+                </button>
+                <div id="helloWorldResult" class="mt-4 hidden">
+                    <h3 class="font-medium text-gray-700">Response:</h3>
+                    <pre id="helloWorldResponse" class="mt-2 bg-gray-100 p-3 rounded-md text-sm overflow-auto"></pre>
+                </div>
+            </div>
+
+            <!-- Create Message Function -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-xl font-semibold mb-4">Create Message</h2>
+                <div class="mb-4">
+                    <label for="messageText" class="block text-sm font-medium text-gray-700 mb-1">Message:</label>
+                    <input type="text" id="messageText" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="Enter your message">
+                </div>
+                <div class="mb-4">
+                    <label for="sender" class="block text-sm font-medium text-gray-700 mb-1">Sender:</label>
+                    <input type="text" id="sender" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="Your name">
+                </div>
+                <div class="mb-4">
+                    <label for="room" class="block text-sm font-medium text-gray-700 mb-1">Room:</label>
+                    <input type="text" id="room" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="Room name" value="default">
+                </div>
+                <button id="createMessage" class="w-full bg-green-500 hover:bg-green-600 text-white font-medium py-2 px-4 rounded-md">
+                    Create Message
+                </button>
+                <div id="createMessageResult" class="mt-4 hidden">
+                    <h3 class="font-medium text-gray-700">Response:</h3>
+                    <pre id="createMessageResponse" class="mt-2 bg-gray-100 p-3 rounded-md text-sm overflow-auto"></pre>
+                </div>
+            </div>
+
+            <!-- Get Messages Function -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-xl font-semibold mb-4">Get Messages</h2>
+                <div class="mb-4">
+                    <label for="getRoom" class="block text-sm font-medium text-gray-700 mb-1">Room:</label>
+                    <input type="text" id="getRoom" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="Room name" value="default">
+                </div>
+                <button id="getMessages" class="w-full bg-purple-500 hover:bg-purple-600 text-white font-medium py-2 px-4 rounded-md">
+                    Get Messages
+                </button>
+                <div id="getMessagesResult" class="mt-4 hidden">
+                    <h3 class="font-medium text-gray-700">Response:</h3>
+                    <pre id="getMessagesResponse" class="mt-2 bg-gray-100 p-3 rounded-md text-sm overflow-auto max-h-60"></pre>
+                </div>
+            </div>
+
+            <!-- Delete Message Function -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-xl font-semibold mb-4">Delete Message</h2>
+                <div class="mb-4">
+                    <label for="messageId" class="block text-sm font-medium text-gray-700 mb-1">Message ID:</label>
+                    <input type="text" id="messageId" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="Enter message ID">
+                </div>
+                <button id="deleteMessage" class="w-full bg-red-500 hover:bg-red-600 text-white font-medium py-2 px-4 rounded-md">
+                    Delete Message
+                </button>
+                <div id="deleteMessageResult" class="mt-4 hidden">
+                    <h3 class="font-medium text-gray-700">Response:</h3>
+                    <pre id="deleteMessageResponse" class="mt-2 bg-gray-100 p-3 rounded-md text-sm overflow-auto"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Base URL for your Cloud Functions
+        const baseUrl = 'https://us-central1-whispy-app-123.cloudfunctions.net';
+
+        // Hello World Function
+        document.getElementById('callHelloWorld').addEventListener('click', async () => {
+            const name = document.getElementById('name').value || 'Guest';
+            const resultDiv = document.getElementById('helloWorldResult');
+            const responseElement = document.getElementById('helloWorldResponse');
+            
+            resultDiv.classList.remove('hidden');
+            responseElement.textContent = 'Loading...';
+            
+            try {
+                const response = await fetch(`${baseUrl}/helloWorld?name=${encodeURIComponent(name)}`);
+                const data = await response.json();
+                responseElement.textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                responseElement.textContent = `Error: ${error.message}`;
+            }
+        });
+
+        // Create Message Function
+        document.getElementById('createMessage').addEventListener('click', async () => {
+            const text = document.getElementById('messageText').value;
+            const sender = document.getElementById('sender').value;
+            const room = document.getElementById('room').value || 'default';
+            const resultDiv = document.getElementById('createMessageResult');
+            const responseElement = document.getElementById('createMessageResponse');
+            
+            if (!text || !sender) {
+                alert('Please enter both message text and sender name');
+                return;
+            }
+            
+            resultDiv.classList.remove('hidden');
+            responseElement.textContent = 'Loading...';
+            
+            try {
+                const response = await fetch(`${baseUrl}/createMessage`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ text, sender, room })
+                });
+                const data = await response.json();
+                responseElement.textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                responseElement.textContent = `Error: ${error.message}`;
+            }
+        });
+
+        // Get Messages Function
+        document.getElementById('getMessages').addEventListener('click', async () => {
+            const room = document.getElementById('getRoom').value || 'default';
+            const resultDiv = document.getElementById('getMessagesResult');
+            const responseElement = document.getElementById('getMessagesResponse');
+            
+            resultDiv.classList.remove('hidden');
+            responseElement.textContent = 'Loading...';
+            
+            try {
+                const response = await fetch(`${baseUrl}/getMessages?room=${encodeURIComponent(room)}`);
+                const data = await response.json();
+                responseElement.textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                responseElement.textContent = `Error: ${error.message}`;
+            }
+        });
+
+        // Delete Message Function
+        document.getElementById('deleteMessage').addEventListener('click', async () => {
+            const messageId = document.getElementById('messageId').value;
+            const resultDiv = document.getElementById('deleteMessageResult');
+            const responseElement = document.getElementById('deleteMessageResponse');
+            
+            if (!messageId) {
+                alert('Please enter a message ID');
+                return;
+            }
+            
+            resultDiv.classList.remove('hidden');
+            responseElement.textContent = 'Loading...';
+            
+            try {
+                const response = await fetch(`${baseUrl}/deleteMessage?id=${encodeURIComponent(messageId)}`, {
+                    method: 'DELETE'
+                });
+                const data = await response.json();
+                responseElement.textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                responseElement.textContent = `Error: ${error.message}`;
+            }
+        });
+    </script>
+</body>
+</html>
