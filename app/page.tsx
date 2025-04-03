@@ -3,6 +3,9 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import * as Party from 'partysocket';
 import { debounce } from 'lodash';
+import RichTextEditor from './components/RichTextEditor';
+import VoiceRecorder from './components/VoiceRecorder';
+import ThreadView from './components/ThreadView';
 
 // Types
 interface ColorScheme {
@@ -25,28 +28,44 @@ interface BaseMessage {
   type: string;
   sender: string;
   timestamp: number;
+  expiresAt?: number;
+  maxViews?: number;
+  viewCount?: number;
+  requireConfirmation?: boolean;
+  isHidden?: boolean;
+  oneTimeView?: boolean;
+  viewedBy?: string[];
+  threadId?: string; // ID of the thread this message belongs to
+  isThreadStarter?: boolean; // Whether this message starts a thread
+  threadMessageCount?: number; // Count of messages in this thread
 }
 
 interface TextMessage extends BaseMessage {
   type: "text";
   text: string;
+  formattedText?: boolean; // Whether the text contains formatting
   replyTo?: string;
   reactions?: { [emoji: string]: string[] };
   readBy?: string[];
   ratings?: { [raterUserId: string]: number };
   ratingScore?: number;
+  dopeLevel?: string;
+  dopeEmoji?: string;
 }
 
 interface MediaMessage extends BaseMessage {
   type: "media";
-  mediaType: "image" | "video" | "audio";
+  mediaType: "image" | "video" | "audio" | "voice"; // Added voice type
   url: string;
+  duration?: number; // Duration in seconds for audio/voice messages
   caption?: string;
   replyTo?: string;
   reactions?: { [emoji: string]: string[] };
   readBy?: string[];
   ratings?: { [raterUserId: string]: number };
   ratingScore?: number;
+  dopeLevel?: string;
+  dopeEmoji?: string;
 }
 
 type Message = TextMessage | MediaMessage;
@@ -66,6 +85,8 @@ const RATING_HARSH = -1;
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
+  const [formattedInput, setFormattedInput] = useState('');
+  const [isFormattedText, setIsFormattedText] = useState(false);
   const [username, setUsername] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
@@ -74,6 +95,15 @@ export default function Home() {
   const [users, setUsers] = useState<User[]>([]);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState<string | null>(null); // message ID
+  const [showSelfDestructOptions, setShowSelfDestructOptions] = useState(false);
+  const [expirationTime, setExpirationTime] = useState<number | null>(null);
+  const [maxViews, setMaxViews] = useState<number | null>(null);
+  const [requireConfirmation, setRequireConfirmation] = useState(false);
+  const [oneTimeView, setOneTimeView] = useState(false);
+  const [pendingViewConfirmations, setPendingViewConfirmations] = useState<string[]>([]);
+  const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [useRichTextEditor, setUseRichTextEditor] = useState(false);
 
   const socketRef = useRef<Party.default | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -95,85 +125,173 @@ export default function Home() {
   useEffect(() => {
     if (!username) return;
 
+    // Close any existing connection
+    if (socketRef.current) {
+      socketRef.current.close();
+    }
+
+    console.log("Connecting to PartyKit server:", process.env.NEXT_PUBLIC_PARTYKIT_HOST || 'localhost:1999');
+    
     socketRef.current = new Party.default({
       host: process.env.NEXT_PUBLIC_PARTYKIT_HOST || 'localhost:1999',
       room: 'main'
     });
 
     socketRef.current.addEventListener('open', () => {
+      console.log("Socket connection opened");
       setIsConnected(true);
       // Announce joining
       socketRef.current?.send(JSON.stringify({
-        type: 'system',
-        action: 'joined',
+        type: 'clientAction',
+        action: 'join',
         sender: username,
         timestamp: Date.now()
       }));
     });
 
     socketRef.current.addEventListener('message', (event) => {
-      const data = JSON.parse(event.data);
-      
-      if (data.type === 'system') {
-        switch (data.action) {
-          case 'userList':
-            const userMap = new Map<string, User>();
-            data.users.forEach((user: User) => userMap.set(user.id, user));
-            setUsers(data.users);
-            break;
-          case 'read':
-            setMessages(prev => prev.map(msg => {
-              if (msg.id === data.targetMessageId) {
-                const readBy = msg.readBy || [];
-                if (!readBy.includes(data.sender)) {
-                  return { ...msg, readBy: [...readBy, data.sender] };
-                }
+      try {
+        const data = JSON.parse(event.data);
+        console.log("Received message:", data.type);
+        
+        if (data.type === 'systemInfo' || data.type === 'system') {
+          switch (data.action) {
+            case 'userList':
+              console.log("Received user list:", data.users);
+              if (Array.isArray(data.users)) {
+                setUsers(data.users);
               }
-              return msg;
-            }));
-            break;
-          case 'reaction':
-            setMessages(prev => prev.map(msg => {
-              if (msg.id === data.targetMessageId) {
-                const reactions = { ...(msg.reactions || {}) };
-                if (!reactions[data.reaction]) reactions[data.reaction] = [];
-                if (!reactions[data.reaction].includes(data.sender)) {
-                  reactions[data.reaction] = [...reactions[data.reaction], data.sender];
+              break;
+            case 'read':
+              setMessages(prev => prev.map(msg => {
+                if (msg.id === data.targetMessageId) {
+                  const readBy = msg.readBy || [];
+                  if (!readBy.includes(data.sender)) {
+                    return { ...msg, readBy: [...readBy, data.sender] };
+                  }
                 }
-                return { ...msg, reactions };
+                return msg;
+              }));
+              break;
+            case 'reaction':
+            case 'reactionUpdate':
+              setMessages(prev => prev.map(msg => {
+                if (msg.id === data.targetMessageId) {
+                  const reactions = { ...(msg.reactions || {}) };
+                  if (!reactions[data.reaction]) reactions[data.reaction] = [];
+                  if (!reactions[data.reaction].includes(data.sender)) {
+                    reactions[data.reaction] = [...reactions[data.reaction], data.sender];
+                  }
+                  return { ...msg, reactions };
+                }
+                return msg;
+              }));
+              break;
+            case 'messageRatingUpdate':
+              setMessages(prev => prev.map(msg => msg.id === data.targetMessageId ? { ...msg, ratings: data.ratings, ratingScore: data.ratingScore } : msg));
+              break;
+            case 'userRankingUpdate':
+              setUsers(prev => prev.map(u => u.id === data.userId ? { ...u, rankingScore: data.rankingScore } : u));
+              break;
+            case 'messageExpired':
+              setMessages(prev => prev.map(msg => 
+                msg.id === data.targetMessageId ? { ...msg, isHidden: true } : msg
+              ));
+              break;
+            case 'messageViewed':
+              setMessages(prev => prev.map(msg => {
+                if (msg.id === data.targetMessageId) {
+                  return { 
+                    ...msg, 
+                    viewCount: (msg.viewCount || 0) + 1,
+                    isHidden: msg.maxViews ? (msg.viewCount || 0) + 1 >= msg.maxViews : false
+                  };
+                }
+                return msg;
+              }));
+              break;
+            case 'confirmView':
+              // Add message to pending confirmations
+              setPendingViewConfirmations(prev => [...prev, data.targetMessageId]);
+              break;
+            case 'messageAlreadyViewed':
+              // Mark the message as already viewed by this user
+              setMessages(prev => prev.map(msg => {
+                if (msg.id === data.targetMessageId) {
+                  // If viewedBy doesn't exist, create it
+                  const viewedBy = msg.viewedBy || [];
+                  // Add current user to viewedBy if not already there
+                  if (!viewedBy.includes(username)) {
+                    return { 
+                      ...msg, 
+                      viewedBy: [...viewedBy, username]
+                    };
+                  }
+                }
+                return msg;
+              }));
+              break;
+            case 'threadUpdate':
+              // Update thread message count for the thread starter
+              if (data.threadId) {
+                setMessages(prev => prev.map(msg => {
+                  if (msg.threadId === data.threadId && msg.isThreadStarter) {
+                    return {
+                      ...msg,
+                      threadMessageCount: data.threadMessageCount
+                    };
+                  }
+                  return msg;
+                }));
               }
-              return msg;
+              break;
+          }
+        } else if (data.type === 'text' || data.type === 'media') {
+          // Handle regular messages
+          setMessages((prev) => {
+            // Avoid duplicates
+            if (prev.find(m => m.id === data.id)) return prev;
+            return [...prev, data];
+          });
+          
+          // If message requires confirmation, don't automatically view it
+          if (!data.requireConfirmation && data.maxViews && data.sender !== username) {
+            // Send view notification
+            socketRef.current?.send(JSON.stringify({
+              type: 'clientAction',
+              action: 'viewMessage',
+              targetMessageId: data.id,
+              timestamp: Date.now()
             }));
-            break;
-          case 'messageRatingUpdate':
-            setMessages(prev => prev.map(msg => msg.id === data.targetMessageId ? { ...msg, ratings: data.ratings, ratingScore: data.ratingScore } : msg));
-            break;
-          case 'userRankingUpdate':
-            setUsers(prev => prev.map(u => u.id === data.userId ? { ...u, rankingScore: data.rankingScore } : u));
-            break;
+          }
+        } else if (data.type === 'settingsUpdate') {
+          // Handle settings updates if needed
+          console.log("Received settings update");
         }
-      } else {
-        setMessages((prev) => {
-          // Avoid duplicates
-          if (prev.find(m => m.id === data.id)) return prev;
-          return [...prev, data];
-        });
+      } catch (error) {
+        console.error("Error parsing message:", error, event.data);
       }
     });
 
     socketRef.current.addEventListener('close', () => {
+      console.log("Socket connection closed");
       setIsConnected(false);
-      setUsers([]);
+    });
+
+    socketRef.current.addEventListener('error', (error) => {
+      console.error("Socket error:", error);
     });
 
     return () => {
-      socketRef.current?.send(JSON.stringify({
-        type: 'system',
-        action: 'left',
-        sender: username,
-        timestamp: Date.now()
-      }));
-      socketRef.current?.close();
+      if (socketRef.current) {
+        socketRef.current.send(JSON.stringify({
+          type: 'clientAction',
+          action: 'left',
+          sender: username,
+          timestamp: Date.now()
+        }));
+        socketRef.current.close();
+      }
       sendTypingStatus.cancel();
     };
   }, [username, sendTypingStatus]);
@@ -228,7 +346,7 @@ export default function Home() {
 
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!socketRef.current || (!input.trim() && !mediaPreview)) return;
+    if (!socketRef.current || (!input.trim() && !formattedInput.trim() && !mediaPreview)) return;
 
     let messageData: Partial<Message> = {
       id: crypto.randomUUID(),
@@ -236,6 +354,30 @@ export default function Home() {
       timestamp: Date.now(),
       replyTo: replyingTo?.id
     };
+
+    // Add thread ID if replying in a thread
+    if (activeThreadId) {
+      messageData.threadId = activeThreadId;
+    }
+
+    // Add self-destruct options if enabled
+    if (expirationTime) {
+      messageData.expiresAt = Date.now() + expirationTime * 1000; // Convert seconds to milliseconds
+    }
+    
+    if (maxViews && maxViews > 0) {
+      messageData.maxViews = maxViews;
+      messageData.viewCount = 0;
+    }
+    
+    if (requireConfirmation) {
+      messageData.requireConfirmation = true;
+    }
+    
+    if (oneTimeView) {
+      messageData.oneTimeView = true;
+      messageData.viewedBy = [];
+    }
 
     if (mediaPreview && fileInputRef.current?.files?.[0]) {
       const file = fileInputRef.current.files[0];
@@ -249,19 +391,53 @@ export default function Home() {
         caption: input
       };
     } else {
+      // Use formatted text if rich text editor is enabled
       messageData = {
         ...messageData,
         type: 'text',
-        text: input
+        text: useRichTextEditor ? formattedInput : input,
+        formattedText: useRichTextEditor && isFormattedText
       };
     }
 
     socketRef.current.send(JSON.stringify(messageData));
     setInput('');
+    setFormattedInput('');
+    setIsFormattedText(false);
     setMediaPreview(null);
     setReplyingTo(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
     sendTypingStatus(false);
+    
+    // Reset self-destruct options
+    setExpirationTime(null);
+    setMaxViews(null);
+    setRequireConfirmation(false);
+    setOneTimeView(false);
+    setShowSelfDestructOptions(false);
+    
+    // Close voice recorder if open
+    setShowVoiceRecorder(false);
+    
+    // Close thread view if sending from thread
+    if (activeThreadId) {
+      setActiveThreadId(null);
+    }
+  };
+
+  const confirmViewMessage = (messageId: string) => {
+    if (!socketRef.current) return;
+    
+    // Send confirmation
+    socketRef.current.send(JSON.stringify({
+      type: 'clientAction',
+      action: 'confirmView',
+      targetMessageId: messageId,
+      timestamp: Date.now()
+    }));
+    
+    // Remove from pending confirmations
+    setPendingViewConfirmations(prev => prev.filter(id => id !== messageId));
   };
 
   const handleReaction = (messageId: string, emoji: string) => {
@@ -306,6 +482,41 @@ export default function Home() {
       ? `bg-gradient-to-r ${colorScheme.primary} ${colorScheme.text}` 
       : `${colorScheme.background} backdrop-blur-sm ${colorScheme.text}/90`;
     const repliedTo = msg.replyTo ? findMessageById(msg.replyTo) : null;
+    
+    // Check if message is hidden (expired or max views reached)
+    if (msg.isHidden) {
+      return (
+        <div className={`flex ${messageClass} group relative opacity-50`}>
+          <div className={`max-w-[80%] rounded-2xl px-4 py-3 bg-gray-800 text-gray-400 relative`}>
+            <p className="text-sm font-semibold opacity-90">{msg.sender}</p>
+            <p className="text-lg italic">This message is no longer available</p>
+            <div className="text-xs mt-1">
+              {msg.expiresAt ? "Message expired" : msg.oneTimeView && msg.viewedBy?.includes(username) ? "You've already viewed this message" : "View limit reached"}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    
+    // Check if message requires confirmation
+    if (msg.requireConfirmation && pendingViewConfirmations.includes(msg.id)) {
+      return (
+        <div className={`flex ${messageClass} group relative`}>
+          <div className={`max-w-[80%] rounded-2xl px-4 py-3 bg-yellow-800 text-white relative`}>
+            <p className="text-sm font-semibold opacity-90">{msg.sender}</p>
+            <p className="text-lg">This message requires confirmation to view</p>
+            <div className="flex justify-end mt-2">
+              <button 
+                onClick={() => confirmViewMessage(msg.id)}
+                className="px-3 py-1 bg-yellow-600 hover:bg-yellow-500 rounded text-white"
+              >
+                View Message
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     return (
       <div 
@@ -328,7 +539,13 @@ export default function Home() {
           {/* Sender & Content */}  
           <p className="text-sm font-semibold opacity-90">{msg.sender}</p>
           {msg.type === 'text' ? (
-            <p className="text-lg break-words">{msg.text}</p>
+            <div className="text-lg break-words">
+              {msg.formattedText ? (
+                <div dangerouslySetInnerHTML={{ __html: msg.text }} />
+              ) : (
+                <p>{msg.text}</p>
+              )}
+            </div>
           ) : (
             <div className="space-y-2">
               {msg.mediaType === 'image' && (
@@ -340,7 +557,49 @@ export default function Home() {
               {msg.mediaType === 'audio' && (
                 <audio src={msg.url} controls className="w-full" />
               )}
+              {msg.mediaType === 'voice' && (
+                <div className="flex items-center space-x-2">
+                  <audio src={msg.url} controls className="w-full" />
+                  {msg.duration && <span className="text-xs">{Math.floor(msg.duration / 60)}:{(msg.duration % 60).toString().padStart(2, '0')}</span>}
+                </div>
+              )}
               {msg.caption && <p className="text-sm opacity-90 mt-1">{msg.caption}</p>}
+            </div>
+          )}
+
+          {/* Thread indicator */}
+          {(msg.isThreadStarter || msg.threadId) && (
+            <div 
+              className="mt-1 flex items-center text-xs space-x-1 cursor-pointer hover:underline"
+              onClick={() => setActiveThreadId(msg.threadId || null)}
+            >
+              <span className="text-blue-300">
+                {msg.isThreadStarter ? 
+                  `${msg.threadMessageCount || 1} ${(msg.threadMessageCount || 1) > 1 ? 'replies' : 'reply'}` : 
+                  'View thread'}
+              </span>
+            </div>
+          )}
+
+          {/* Self-destruct indicators */}
+          {(msg.expiresAt || msg.maxViews || msg.oneTimeView) && (
+            <div className="mt-1 flex items-center text-xs space-x-2">
+              {msg.expiresAt && (
+                <span className="bg-red-900/30 px-2 py-0.5 rounded-full">
+                  Expires: {new Date(msg.expiresAt).toLocaleTimeString()}
+                </span>
+              )}
+              {msg.maxViews && (
+                <span className="bg-orange-900/30 px-2 py-0.5 rounded-full">
+                  Views: {msg.viewCount || 0}/{msg.maxViews}
+                </span>
+              )}
+              {msg.oneTimeView && (
+                <span className="bg-purple-900/30 px-2 py-0.5 rounded-full flex items-center">
+                  <span className="mr-1">👁️</span> One-time view
+                  {msg.viewedBy && msg.viewedBy.length > 0 && ` (${msg.viewedBy.length} users)`}
+                </span>
+              )}
             </div>
           )}
 
@@ -377,6 +636,7 @@ export default function Home() {
                 onClick={() => rateMessage(msg.id, RATING_BLINKERS)}
                 className={`px-1 py-0.5 rounded text-xs transition-colors ${(msg.ratings?.[username] ?? 0) === RATING_BLINKERS ? 'bg-green-200 border border-green-400' : 'bg-gray-200 border-gray-300 hover:bg-green-100'}`}
                 title="Blinkers (+1)"
+                disabled={!username || msg.sender === username} 
               >
                 ✨
               </button>
@@ -384,13 +644,14 @@ export default function Home() {
                 onClick={() => rateMessage(msg.id, RATING_HARSH)}
                 className={`px-1 py-0.5 rounded text-xs transition-colors ${(msg.ratings?.[username] ?? 0) === RATING_HARSH ? 'bg-red-200 border border-red-400' : 'bg-gray-200 border-gray-300 hover:bg-red-100'}`}
                 title="Harsh (-1)"
+                disabled={!username || msg.sender === username} 
               >
                 💩
               </button>
             </div>
           )}
 
-          {/* Action Buttons (Reply/React) - Show on hover */} 
+          {/* Action Buttons (Reply/React/Thread) - Show on hover */} 
           <div className="absolute top-0 right-0 flex opacity-0 group-hover:opacity-100 transition-opacity -mt-4 mr-1 bg-black/40 backdrop-blur-sm rounded-full p-1 space-x-1">
             <button 
               onClick={() => setReplyingTo(msg)}
@@ -402,6 +663,11 @@ export default function Home() {
               className="text-xs p-1 rounded-full hover:bg-white/20" 
               title="React"
             >😊</button>
+            <button 
+              onClick={() => createThread(msg.id)}
+              className="text-xs p-1 rounded-full hover:bg-white/20" 
+              title="Create thread"
+            >🧵</button>
           </div>
           
           {/* Emoji Picker */} 
@@ -492,6 +758,111 @@ export default function Home() {
     );
   }
 
+  const handleVoiceRecordingComplete = async (audioBlob: Blob, duration: number) => {
+    if (!socketRef.current) return;
+    
+    // Convert Blob to base64
+    const reader = new FileReader();
+    const base64Promise = new Promise<string>((resolve) => {
+      reader.onloadend = () => {
+        const base64String = reader.result as string;
+        resolve(base64String);
+      };
+    });
+    reader.readAsDataURL(audioBlob);
+    
+    const base64String = await base64Promise;
+    
+    const messageData: Partial<Message> = {
+      id: crypto.randomUUID(),
+      sender: username,
+      timestamp: Date.now(),
+      replyTo: replyingTo?.id,
+      type: 'media',
+      mediaType: 'voice',
+      url: base64String,
+      duration: duration,
+      caption: input
+    };
+    
+    // Add thread ID if replying in a thread
+    if (activeThreadId) {
+      messageData.threadId = activeThreadId;
+    }
+    
+    // Add self-destruct options if enabled
+    if (expirationTime) {
+      messageData.expiresAt = Date.now() + expirationTime * 1000;
+    }
+    
+    if (maxViews && maxViews > 0) {
+      messageData.maxViews = maxViews;
+      messageData.viewCount = 0;
+    }
+    
+    if (requireConfirmation) {
+      messageData.requireConfirmation = true;
+    }
+    
+    if (oneTimeView) {
+      messageData.oneTimeView = true;
+      messageData.viewedBy = [];
+    }
+    
+    socketRef.current.send(JSON.stringify(messageData));
+    setInput('');
+    setShowVoiceRecorder(false);
+    setReplyingTo(null);
+    
+    // Reset self-destruct options
+    setExpirationTime(null);
+    setMaxViews(null);
+    setRequireConfirmation(false);
+    setOneTimeView(false);
+    setShowSelfDestructOptions(false);
+    
+    // Close thread view if sending from thread
+    if (activeThreadId) {
+      setActiveThreadId(null);
+    }
+  };
+
+  const createThread = (messageId: string) => {
+    if (!socketRef.current) return;
+    
+    socketRef.current.send(JSON.stringify({
+      type: 'clientAction',
+      action: 'createThread',
+      targetMessageId: messageId,
+      timestamp: Date.now()
+    }));
+    
+    // Open the thread view
+    const message = messages.find(m => m.id === messageId);
+    if (message && message.threadId) {
+      setActiveThreadId(message.threadId);
+    } else {
+      // If no threadId yet, we'll use the message ID as a temporary thread ID
+      // until the server assigns a proper one
+      setActiveThreadId(messageId);
+    }
+  };
+
+  const sendThreadReply = (text: string, threadId: string) => {
+    if (!socketRef.current || !text.trim()) return;
+    
+    const messageData: Partial<Message> = {
+      id: crypto.randomUUID(),
+      sender: username,
+      timestamp: Date.now(),
+      type: 'text',
+      text: text,
+      threadId: threadId
+    };
+    
+    socketRef.current.send(JSON.stringify(messageData));
+  };
+
   return (
     <div className={`h-screen flex flex-col bg-gradient-to-br ${colorScheme.secondary}`}>
       {/* Header */}  
@@ -560,8 +931,8 @@ export default function Home() {
       <div className="flex-1 overflow-hidden relative">
         <div className="h-full max-w-7xl mx-auto p-4 overflow-y-auto scroll-smooth">
           <div className="space-y-4">
-            {messages.map((msg) => (
-              <div key={msg.id}>{renderMessage(msg)}</div>
+            {messages.map((msg, index) => (
+              <div key={index}>{renderMessage(msg)}</div>
             ))}
             <div ref={messagesEndRef} />
           </div>
@@ -590,64 +961,182 @@ export default function Home() {
             <button onClick={() => setReplyingTo(null)} className="text-red-400 hover:text-red-600 text-xl">&times;</button>
           </div>
         )}
-        <form onSubmit={sendMessage} className="max-w-7xl mx-auto">
-          <div className="flex gap-3 items-center">
-            {/* File Upload Button */}  
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileSelect}
-              accept="image/*,video/*,audio/*"
-              className="hidden"
+        
+        {/* Voice Recorder */}
+        {showVoiceRecorder && (
+          <VoiceRecorder 
+            onRecordingComplete={handleVoiceRecordingComplete}
+            onCancel={() => setShowVoiceRecorder(false)}
+          />
+        )}
+        
+        {/* Self-destruct options */}
+        {showSelfDestructOptions && (
+          <div className="mb-4 p-3 bg-gray-800 rounded-lg">
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="text-sm font-medium">Self-Destruct Options</h3>
+              <button 
+                onClick={() => setShowSelfDestructOptions(false)}
+                className="text-gray-400 hover:text-white text-sm"
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs mb-1">Expire after (seconds)</label>
+                <input 
+                  type="number" 
+                  min="5"
+                  value={expirationTime || ''}
+                  onChange={(e) => setExpirationTime(e.target.value ? parseInt(e.target.value) : null)}
+                  className="w-full bg-gray-700 rounded px-2 py-1 text-sm"
+                  placeholder="Never expires"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-xs mb-1">Maximum views</label>
+                <input 
+                  type="number" 
+                  min="1"
+                  value={maxViews || ''}
+                  onChange={(e) => setMaxViews(e.target.value ? parseInt(e.target.value) : null)}
+                  className="w-full bg-gray-700 rounded px-2 py-1 text-sm"
+                  placeholder="Unlimited views"
+                />
+              </div>
+              
+              <div className="flex items-center">
+                <input 
+                  type="checkbox" 
+                  id="requireConfirmation"
+                  checked={requireConfirmation}
+                  onChange={(e) => setRequireConfirmation(e.target.checked)}
+                  className="mr-2"
+                />
+                <label htmlFor="requireConfirmation" className="text-xs">Require confirmation before viewing</label>
+              </div>
+              
+              <div className="flex items-center">
+                <input 
+                  type="checkbox" 
+                  id="oneTimeView"
+                  checked={oneTimeView}
+                  onChange={(e) => setOneTimeView(e.target.checked)}
+                  className="mr-2"
+                />
+                <label htmlFor="oneTimeView" className="text-xs">Each user can only view once</label>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        <form onSubmit={sendMessage} className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (fileInputRef.current) fileInputRef.current.click();
+            }}
+            className="p-2 text-gray-400 hover:text-white"
+            title="Upload media"
+          >
+            📎
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,video/*,audio/*"
+            onChange={handleFileSelect}
+            className="hidden"
+          />
+          
+          <button
+            type="button"
+            onClick={() => setShowVoiceRecorder(!showVoiceRecorder)}
+            className="p-2 text-gray-400 hover:text-white"
+            title="Record voice message"
+          >
+            🎤
+          </button>
+          
+          <button
+            type="button"
+            onClick={() => setUseRichTextEditor(!useRichTextEditor)}
+            className={`p-2 ${useRichTextEditor ? 'text-blue-400' : 'text-gray-400 hover:text-white'}`}
+            title="Toggle rich text editor"
+          >
+            📝
+          </button>
+          
+          {useRichTextEditor ? (
+            <RichTextEditor 
+              value={formattedInput}
+              onChange={(value, isFormatted) => {
+                setFormattedInput(value);
+                setIsFormattedText(isFormatted);
+                if (value.trim()) {
+                  sendTypingStatus(true);
+                } else {
+                  sendTypingStatus(false);
+                }
+              }}
+              className="flex-1 bg-gray-800 rounded-full px-4 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500"
             />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              title="Attach File"
-              className={`p-3 ${colorScheme.background} border border-white/20 rounded-xl hover:bg-white/10 transition-colors flex items-center justify-center aspect-square`}
-            >
-              <span className="text-xl">📎</span>
-            </button>
-            {/* Text Input */}  
+          ) : (
             <input
               type="text"
               value={input}
               onChange={(e) => {
                 setInput(e.target.value);
-                sendTypingStatus(true);
+                if (e.target.value.trim()) {
+                  sendTypingStatus(true);
+                } else {
+                  sendTypingStatus(false);
+                }
               }}
-              onBlur={() => sendTypingStatus(false)}
-              placeholder={mediaPreview ? "Add a caption..." : "Yo something..."}
-              className={`flex-1 p-4 ${colorScheme.background} border border-white/20 rounded-xl ${colorScheme.text} placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500`}
+              placeholder="Type a message..."
+              className="flex-1 bg-gray-800 rounded-full px-4 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500"
             />
-            {/* Send Button */}  
-            <button
-              type="submit"
-              className={`px-8 py-4 bg-gradient-to-r ${colorScheme.primary} ${colorScheme.text} rounded-xl font-bold hover:opacity-90 transition-all duration-200 transform hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none`}
-              disabled={!isConnected || (!input.trim() && !mediaPreview)}
-            >
-              Yo!
-            </button>
-          </div>
-          {/* Media Preview */}  
-          {mediaPreview && (
-            <div className="mt-2 relative w-fit">
-              <img src={mediaPreview} alt="Preview" className="h-20 rounded-lg" />
-              <button
-                type="button"
-                onClick={() => {
-                  setMediaPreview(null);
-                  if (fileInputRef.current) fileInputRef.current.value = '';
-                }}
-                title="Remove Attachment"
-                className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs shadow-md"
-              >
-                &times;
-              </button>
-            </div>
           )}
+          <button
+            type="button"
+            onClick={() => setShowSelfDestructOptions(!showSelfDestructOptions)}
+            className={`p-2 text-gray-400 hover:text-white ${showSelfDestructOptions ? 'text-orange-500' : ''}`}
+            title="Self-destruct options"
+          >
+            🔥
+          </button>
+          <button
+            type="submit"
+            disabled={!input.trim() && !formattedInput.trim() && !mediaPreview}
+            className={`p-2 rounded-full ${!input.trim() && !formattedInput.trim() && !mediaPreview ? 'bg-gray-800 text-gray-600' : 'bg-gradient-to-r from-purple-600 to-blue-600 text-white'}`}
+          >
+            ➤
+          </button>
         </form>
       </div>
     </div>
   );
+
+  // Thread View Modal
+  {activeThreadId !== null && (
+    <ThreadView
+      threadId={activeThreadId as string}
+      threadStarter={messages.find(m => m.threadId === activeThreadId && m.isThreadStarter) || 
+                    messages.find(m => m.id === activeThreadId) || 
+                    {
+                      id: '',
+                      type: 'text',
+                      text: 'Thread not found',
+                      sender: username,
+                      timestamp: Date.now()
+                    }}
+      messages={messages}
+      currentUser={username}
+      onClose={() => setActiveThreadId(null)}
+      onSendReply={sendThreadReply}
+    />
+  )}
 }
